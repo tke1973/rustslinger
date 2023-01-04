@@ -1,5 +1,5 @@
 /*
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright Thomas Kessler <tom@kessler.group> All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0.
  */
 
@@ -15,16 +15,12 @@ use futures::channel::mpsc;
 use futures::executor::ThreadPool;
 use futures::stream::StreamExt;
 
-// snippet-start:[s3.rust.client-use]
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
 use aws_sdk_s3::Client;
-// snippet-end:[s3.rust.client-use]
 
-/// Lists your buckets.
 #[tokio::main]
 async fn main() -> Result<(), aws_sdk_s3::Error> {
-    // snippet-start:[s3.rust.client-client]
     let region_provider = RegionProviderChain::default_provider().or_else("ap-southeast-1");
 
     let credentials_provider = ProfileFileCredentialsProvider::builder()
@@ -38,7 +34,6 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
         .await;
 
     let client = Client::new(&config);
-    // snippet-end:[s3.rust.client-client]
 
     let resp = client.list_buckets().send().await?;
     let buckets = resp.buckets().unwrap_or_default();
@@ -75,7 +70,7 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
     println!("Waiting...");
 
     let mut i = 0;
-    let pool = ThreadPool::new().unwrap();
+    let tpool = ThreadPool::new().unwrap();
     let (tx, mut rx) = mpsc::unbounded::<String>();
     let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
 
@@ -86,9 +81,7 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
         let tx = tx.clone();
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-        pool.spawn_ok(async move {
-            // thread code
-
+        tpool.spawn_ok(async move {
             let mut thehash = Sha256::new();
             thehash.update(&image);
             let res = thehash.finalize();
