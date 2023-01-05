@@ -15,16 +15,12 @@ use futures::channel::mpsc;
 use futures::executor::ThreadPool;
 use futures::stream::StreamExt;
 
-// snippet-start:[s3.rust.client-use]
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
 use aws_sdk_s3::Client;
-// snippet-end:[s3.rust.client-use]
 
-/// Lists your buckets.
 #[tokio::main]
 async fn main() -> Result<(), aws_sdk_s3::Error> {
-    // snippet-start:[s3.rust.client-client]
     let region_provider = RegionProviderChain::default_provider().or_else("ap-southeast-1");
 
     let credentials_provider = ProfileFileCredentialsProvider::builder()
@@ -32,13 +28,12 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
         .build();
 
     let config = aws_config::from_env()
-        .region(region_provider)
-        .credentials_provider(credentials_provider)
+        //    .region(region_provider)
+        //    .credentials_provider(credentials_provider)
         .load()
         .await;
 
     let client = Client::new(&config);
-    // snippet-end:[s3.rust.client-client]
 
     let resp = client.list_buckets().send().await?;
     let buckets = resp.buckets().unwrap_or_default();
