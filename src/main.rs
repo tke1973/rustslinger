@@ -1,5 +1,5 @@
 /*
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright Thomas Kessler <tom@kessler.group> All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0.
  */
 
@@ -70,7 +70,7 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
     println!("Waiting...");
 
     let mut i = 0;
-    let pool = ThreadPool::new().unwrap();
+    let tpool = ThreadPool::new().unwrap();
     let (tx, mut rx) = mpsc::unbounded::<String>();
     let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
 
@@ -81,9 +81,7 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
         let tx = tx.clone();
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-        pool.spawn_ok(async move {
-            // thread code
-
+        tpool.spawn_ok(async move {
             let mut thehash = Sha256::new();
             thehash.update(&image);
             let res = thehash.finalize();
