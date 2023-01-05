@@ -28,7 +28,7 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
         .build();
 
     let config = aws_config::from_env()
-        //    .region(region_provider)
+        .region(region_provider)
         //    .credentials_provider(credentials_provider)
         .load()
         .await;
@@ -81,6 +81,8 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
         let tx = tx.clone();
         let permit = semaphore.clone().acquire_owned().await.unwrap();
 
+        let img2 = Cursor::new(image.clone());
+
         tpool.spawn_ok(async move {
             let mut thehash = Sha256::new();
             thehash.update(&image);
@@ -112,6 +114,19 @@ async fn main() -> Result<(), aws_sdk_s3::Error> {
 
             //println!("{} hash is: {:?}", object.key().unwrap_or_default(), res);
             println!("hash is: {:?}", res);
+
+            let mut a = std::io::BufReader::new(img2);
+            let exifreader = exif::Reader::new();
+            let exif = exifreader.read_from_container(&mut a).unwrap();
+            for f in exif.fields() {
+                tx.unbounded_send(format!(
+                    "{} {} {}",
+                    f.tag,
+                    f.ifd_num,
+                    f.display_value().with_unit(&exif)
+                ))
+                .expect("msg");
+            }
 
             drop(permit);
         });
