@@ -22,6 +22,11 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
 use aws_sdk_s3::Client;
 
+mod error;
+pub use error::RustslingerError;
+
+use anyhow::{bail, Result};
+
 /// rustslinger
 /// Fully functional learning and experimenting application. Entirely written in Rust.
 #[derive(Parser, Debug)]
@@ -45,14 +50,13 @@ struct Args {
 }
 
 // List all available s3 buckets
-async fn list_s3buckets(client: &Client) -> Result<(), ()> {
+async fn list_s3buckets(client: &Client) -> Result<(), RustslingerError> {
     let list_buckets = if let Ok(list_buckets) = client.list_buckets().send().await {
         list_buckets
     } else {
         // This is an error we can't recover from.
         // Therefore, we throw an  error message.
-        println!("Error: Could not list buckets. Exiting.");
-        return Err(());
+        return Err(RustslingerError::AWSListBucketsOutputError);
     };
 
     let bucket_names = if let Some(bucket_names) = list_buckets.buckets() {
@@ -78,7 +82,7 @@ async fn list_s3buckets(client: &Client) -> Result<(), ()> {
 // use tokio to download the file
 // use sha2 to calculate the hash
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     // get command line options
     let args = Args::parse();
 
@@ -112,8 +116,7 @@ async fn main() {
 
     // If the user specified the --bucketlist option, we list all available s3 buckets and exit.
     if args.bucketlist && list_s3buckets(&client).await.is_err() {
-        println!("Error: Cant list buckets. Exiting.");
-        return;
+        bail!("Can't list s3 buckets.");
     };
 
     let list_s3objects = if let Ok(list_s3objects) = client
@@ -124,22 +127,17 @@ async fn main() {
     {
         list_s3objects
     } else {
-        return;
+        bail!("Can't list s3 objects.");
     };
 
     let list_s3objects_contents = if let Some(list_s3objects_contents) = list_s3objects.contents() {
         list_s3objects_contents
     } else {
-        return;
+        bail!("Can't list s3 objects contents.");
     };
 
     let mut fetches = futures::stream::iter(list_s3objects_contents.iter().map(|path| async {
-        let object_path_key = if let Some(object_path_key) = path.key() {
-            object_path_key
-        } else {
-            println!("Error: Could not get object path key from object.");
-            return None;
-        };
+        let object_path_key = path.key()?;
 
         let object_response = if let Ok(object_response) = client
             .get_object()
@@ -168,7 +166,7 @@ async fn main() {
     let tpool = if let Ok(tpool) = ThreadPool::new() {
         tpool
     } else {
-        return;
+        bail!("Can't create thread pool.")
     };
 
     let (tx, mut rx) = mpsc::unbounded::<String>();
@@ -188,8 +186,7 @@ async fn main() {
             let permit = if let Ok(permit) = semaphore.clone().acquire_owned().await {
                 permit
             } else {
-                println!("Error: Could not acquire semaphore permit. Exiting.");
-                return;
+                bail!("Error: Could not acquire semaphore permit. Exiting.")
             };
 
             let img2 = Cursor::new(image.clone());
@@ -269,4 +266,5 @@ async fn main() {
     }
 
     println!("Done with it!");
+    Ok(())
 }

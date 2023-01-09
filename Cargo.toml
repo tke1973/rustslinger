@@ -22,5 +22,7 @@ rqrr = "0.6.0"
 num_cpus = "1.15.0"
 kamadak-exif = "0.5.5"
 clap = {version = "4.0.32", features =["derive"]}
+thiserror = {version ="1"}
+anyhow = {version ="1"}
 
 
