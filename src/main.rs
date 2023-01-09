@@ -87,10 +87,9 @@ async fn main() {
 
     let profile = if let Some(profile_string) = args.profile {
         Some(profile_string)
-    } else if let Some(osprofile_string) = env::var_os("AWS_DEFAULT_PROFILE") {
-        Some(osprofile_string.to_string_lossy().to_string())
     } else {
-        None
+        env::var_os("AWS_DEFAULT_PROFILE")
+            .map(|osprofile_string| osprofile_string.to_string_lossy().to_string())
     };
 
     // We only use a custom credential_provider if a profile name has been specified.
@@ -112,11 +111,9 @@ async fn main() {
     let client = Client::new(&config);
 
     // If the user specified the --bucketlist option, we list all available s3 buckets and exit.
-    if args.bucketlist {
-        if let Err(_) = list_s3buckets(&client).await {
-            println!("Error: Cant list buckets. Exiting.");
-            return;
-        }
+    if args.bucketlist && list_s3buckets(&client).await.is_err() {
+        println!("Error: Cant list buckets. Exiting.");
+        return;
     };
 
     let resp = if let Ok(resp) = client
