@@ -46,8 +46,8 @@ struct Args {
 
 // List all available s3 buckets
 async fn list_s3buckets(client: &Client) -> Result<(), ()> {
-    let resp = if let Ok(resp) = client.list_buckets().send().await {
-        resp
+    let list_buckets = if let Ok(list_buckets) = client.list_buckets().send().await {
+        list_buckets
     } else {
         // This is an error we can't recover from.
         // Therefore, we throw an  error message.
@@ -55,21 +55,21 @@ async fn list_s3buckets(client: &Client) -> Result<(), ()> {
         return Err(());
     };
 
-    let buckets = if let Some(buckets) = resp.buckets() {
-        buckets
+    let bucket_names = if let Some(bucket_names) = list_buckets.buckets() {
+        bucket_names
     } else {
         println!("NO BUCKETS FOUND.");
         return Ok(());
     };
 
-    for bucket in buckets {
-        if let Some(bucket_name) = bucket.name() {
+    for bucket_name in bucket_names {
+        if let Some(bucket_name) = bucket_name.name() {
             println!("{}", bucket_name);
         }
     }
 
     println!();
-    println!("Found {} buckets.", buckets.len());
+    println!("Found {} buckets.", bucket_names.len());
 
     Ok(())
 }
@@ -93,23 +93,25 @@ async fn main() {
         None
     };
 
-    // We only use a credential_provider if a profile name has been specified.
-    // Either by OS environment variable AWS_DEFAULT_PROFILE or command line option.
+    // We only use a custom credential_provider if a profile name has been specified.
+    // Either by OS environment variable AWS_DEFAULT_PROFILE or by command line option.
     // Otherwaise, the deault credentional provider is used by the sdk.
     let config = if let Some(profile_string) = profile {
         let credentials_provider = ProfileFileCredentialsProvider::builder()
             .profile_name(&profile_string)
             .build();
-        print!("PROFILE: Using profile {}.", profile_string);
+        println!("PROFILE: Using profile {}.", profile_string);
         config.credentials_provider(credentials_provider)
     } else {
-        print!("PROFILE: No profile specified. Using default credentials provider.");
+        println!("PROFILE: No profile specified. Using default credentials provider.");
         config
     };
 
+    // Load our aws config abd create a new s3 client.
     let config = config.load().await;
     let client = Client::new(&config);
 
+    // If the user specified the --bucketlist option, we list all available s3 buckets and exit.
     if args.bucketlist {
         if let Err(_) = list_s3buckets(&client).await {
             println!("Error: Cant list buckets. Exiting.");
