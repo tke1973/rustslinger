@@ -116,34 +116,45 @@ async fn main() {
         return;
     };
 
-    let resp = if let Ok(resp) = client
+    let list_s3objects = if let Ok(list_s3objects) = client
         .list_objects_v2()
         .bucket(args.bucket.clone())
         .send()
         .await
     {
-        resp
+        list_s3objects
     } else {
         return;
     };
 
-    let resp3 = resp.contents().unwrap_or_default();
+    let list_s3objects_contents = if let Some(list_s3objects_contents) = list_s3objects.contents() {
+        list_s3objects_contents
+    } else {
+        return;
+    };
 
-    let mut fetches = futures::stream::iter(resp3.iter().map(|path| async {
-        let object_resp = if let Ok(object_resp) = client
+    let mut fetches = futures::stream::iter(list_s3objects_contents.iter().map(|path| async {
+        let object_path_key = if let Some(object_path_key) = path.key() {
+            object_path_key
+        } else {
+            println!("Error: Could not get object path key from object.");
+            return None;
+        };
+
+        let object_response = if let Ok(object_response) = client
             .get_object()
             .bucket(args.bucket.clone())
-            .key(path.key().unwrap_or_default())
+            .key(object_path_key)
             .send()
             .await
         {
-            object_resp
+            object_response
         } else {
             return None;
         };
 
-        if let Ok(object_resp_body) = object_resp.body.collect().await {
-            Some(object_resp_body.into_bytes())
+        if let Ok(object_response_body) = object_response.body.collect().await {
+            Some(object_response_body.into_bytes())
         } else {
             None
         }
@@ -174,7 +185,12 @@ async fn main() {
             i += 1;
 
             let tx = tx.clone();
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = if let Ok(permit) = semaphore.clone().acquire_owned().await {
+                permit
+            } else {
+                println!("Error: Could not acquire semaphore permit. Exiting.");
+                return;
+            };
 
             let img2 = Cursor::new(image.clone());
 
@@ -222,15 +238,23 @@ async fn main() {
 
                 let mut a = std::io::BufReader::new(img2);
                 let exifreader = exif::Reader::new();
-                let exif = exifreader.read_from_container(&mut a).unwrap();
+                let exif = if let Ok(exif) = exifreader.read_from_container(&mut a) {
+                    exif
+                } else {
+                    println!("Error: Could not read exif data from image.");
+                    return;
+                };
+
                 for f in exif.fields() {
-                    tx.unbounded_send(format!(
-                        "{} {} {}",
-                        f.tag,
-                        f.ifd_num,
-                        f.display_value().with_unit(&exif)
-                    ))
-                    .expect("msg");
+                    if tx
+                        .unbounded_send(format!(
+                            "{} {} {}",
+                            f.tag,
+                            f.ifd_num,
+                            f.display_value().with_unit(&exif)
+                        ))
+                        .is_ok()
+                    {};
                 }
 
                 drop(permit);
