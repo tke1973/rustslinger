@@ -9,7 +9,7 @@
 
 Key concepts and technologies used to develop **rustslinger** include:
 
-- Conncurrency & Mutlitheading with async/await and threadpools using [futures](https://crates.io/crates/futures) and [Tokio](https://crates.io/crates/tokio)
+- Concurrency & Multithreading with async/await and threadpools using [futures](https://crates.io/crates/futures) and [Tokio](https://crates.io/crates/tokio)
 - AWS Rust SDK using [aws-sdk-s3](https://crates.io/crates/aws-sdk-s3) and [aws_config](https://crates.io/crates/aws-config)
 - QR Code Scanning using [rqrr](https://crates.io/crates/rqrr) and [image](https://crates.io/crates/image)
 - EXIF Metadata Extraction using [kamadak-exif](https://crates.io/crates/kamadak-exif) 
