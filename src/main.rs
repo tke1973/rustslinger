@@ -4,7 +4,9 @@
 //
 
 use clap::Parser;
+use std::dbg;
 use std::env;
+use std::fmt::Write;
 
 use sha2::{Digest, Sha256};
 
@@ -29,7 +31,7 @@ use anyhow::{bail, Result};
 
 /// rustslinger
 ///
-/// rustslinger is a tool for scanning and analysing large image data sets stored in AWS S3 buckets.
+/// rustslinger is a tool for scanning and analysing large image data sets stored on AWS S3 buckets.
 /// A fully functional, non-trivial, learning and experimentation application written to get familiar with the Rust programming language.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -121,49 +123,12 @@ async fn main() -> Result<()> {
         bail!("Can't list s3 buckets.");
     };
 
-    let list_s3objects = if let Ok(list_s3objects) = client
+    // Get a list of all objects in the specified s3 bucket  paginateing.
+    let mut list_s3objects = client
         .list_objects_v2()
         .bucket(args.bucket.clone())
-        .send()
-        .await
-    {
-        list_s3objects
-    } else {
-        bail!("Can't list s3 objects.");
-    };
-
-    let list_s3objects_contents = if let Some(list_s3objects_contents) = list_s3objects.contents() {
-        list_s3objects_contents
-    } else {
-        bail!("Can't list s3 objects contents.");
-    };
-
-    let mut fetches = futures::stream::iter(list_s3objects_contents.iter().map(|path| async {
-        let object_path_key = path.key()?;
-
-        let object_response = if let Ok(object_response) = client
-            .get_object()
-            .bucket(args.bucket.clone())
-            .key(object_path_key)
-            .send()
-            .await
-        {
-            object_response
-        } else {
-            return None;
-        };
-
-        if let Ok(object_response_body) = object_response.body.collect().await {
-            Some(object_response_body.into_bytes())
-        } else {
-            None
-        }
-    }))
-    .buffer_unordered(30);
-
-    println!("Waiting...");
-
-    let mut i = 0;
+        .into_paginator()
+        .send();
 
     let tpool = if let Ok(tpool) = ThreadPool::new() {
         tpool
@@ -179,86 +144,122 @@ async fn main() -> Result<()> {
     // Don't forget the in parallel we are still downloading files from aws s3 inside the Tokio runtime.
     let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
 
-    while let Some(object_resp_body_bytes) = fetches.next().await {
-        if let Some(image) = object_resp_body_bytes {
-            println!("this is {}", i);
-            i += 1;
+    while let Some(s3objects) = list_s3objects.next().await {
+        if let Ok(s3objects) = s3objects {
+            if let Some(s3objects_contents) = s3objects.contents() {
+                let mut fetches =
+                    futures::stream::iter(s3objects_contents.iter().map(|path| async {
+                        let object_path_key = path.key()?;
 
-            let tx = tx.clone();
-            let permit = if let Ok(permit) = semaphore.clone().acquire_owned().await {
-                permit
-            } else {
-                bail!("Error: Could not acquire semaphore permit. Exiting.")
-            };
+                        let object_response = if let Ok(object_response) = client
+                            .get_object()
+                            .bucket(args.bucket.clone())
+                            .key(object_path_key)
+                            .send()
+                            .await
+                        {
+                            object_response
+                        } else {
+                            return None;
+                        };
 
-            let img2 = Cursor::new(image.clone());
+                        if let Ok(object_response_body) = object_response.body.collect().await {
+                            Some(object_response_body.into_bytes())
+                        } else {
+                            None
+                        }
+                    }))
+                    .buffer_unordered(30);
 
-            tpool.spawn_ok(async move {
-                let mut thehash = Sha256::new();
-                thehash.update(&image);
-                let res = thehash.finalize();
+                while let Some(object_resp_body_bytes) = fetches.next().await {
+                    if let Some(image) = object_resp_body_bytes {
+                        let tx = tx.clone();
+                        let permit = if let Ok(permit) = semaphore.clone().acquire_owned().await {
+                            permit
+                        } else {
+                            bail!("Error: Could not acquire semaphore permit. Exiting.")
+                        };
 
-                let image_reader = if let Ok(image_reader) =
-                    ImageReader::new(Cursor::new(&image)).with_guessed_format()
-                {
-                    image_reader
-                } else {
-                    // This error is unrecoverable and the thread will therefore not produce a result.
-                    // We end the thread to free CPU and memory resoucres for the next thread.
-                    return;
-                };
+                        let img2 = Cursor::new(image.clone());
 
-                let image_decoded = if let Ok(image_decoded) = image_reader.decode() {
-                    image_decoded.to_luma8()
-                } else {
-                    // This error is unrecoverable and the thread  will therefore not produce a result.
-                    // We end the thread to free CPU and memory resoucres for the next thread.
-                    return;
-                };
+                        tpool.spawn_ok(async move {
+                            let mut hash = Sha256::new();
+                            hash.update(&image);
+                            let hash = hash.finalize();
 
-                let mut image_prepared = rqrr::PreparedImage::prepare(image_decoded);
-                let grids = image_prepared.detect_grids();
+                            // print res as serialized hex string
+                            let mut hash_string = String::new();
+                            for byte in hash {
+                                std::write!(&mut hash_string, "{:02x}", byte).unwrap();
+                            }
 
-                let mut gc = 0;
-                for g in grids {
-                    gc += 1;
+                            let image_reader = if let Ok(image_reader) =
+                                ImageReader::new(Cursor::new(&image)).with_guessed_format()
+                            {
+                                image_reader
+                            } else {
+                                // This error is unrecoverable and the thread will therefore not produce a result.
+                                // We end the thread to free CPU and memory resoucres for the next thread.
+                                return;
+                            };
 
-                    let qrcode_result = g.decode();
+                            let image_decoded = if let Ok(image_decoded) = image_reader.decode() {
+                                image_decoded.to_luma8()
+                            } else {
+                                // This error is unrecoverable and the thread  will therefore not produce a result.
+                                // We end the thread to free CPU and memory resoucres for the next thread.
+                                return;
+                            };
 
-                    let qrcode = match qrcode_result {
-                        Ok((_meta, content)) => content,
-                        Err(_error) => "did got an error while decoding QR code".to_string(),
+                            let mut image_prepared = rqrr::PreparedImage::prepare(image_decoded);
+                            let grids = image_prepared.detect_grids();
+
+                            let mut gc = 0;
+                            for g in grids {
+                                gc += 1;
+
+                                let qrcode_result = g.decode();
+
+                                let qrcode = match qrcode_result {
+                                    Ok((_meta, content)) => content,
+                                    Err(_error) => {
+                                        "did got an error while decoding QR code".to_string()
+                                    }
+                                };
+                                dbg!(gc, &qrcode);
+                                tx.unbounded_send(qrcode).expect("Failed to send");
+                            }
+
+                            dbg!(hash_string);
+
+                            let mut a = std::io::BufReader::new(img2);
+                            let exifreader = exif::Reader::new();
+                            let exif = if let Ok(exif) = exifreader.read_from_container(&mut a) {
+                                exif
+                            } else {
+                                println!("Error: Could not read exif data from image.");
+                                return;
+                            };
+
+                            for f in exif.fields() {
+                                if f.tag.to_string().eq(&"UserComment".to_string()) {
+                                    if tx
+                                        .unbounded_send(format!(
+                                            "{}, {}",
+                                            f.tag,
+                                            f.display_value().with_unit(&exif)
+                                        ))
+                                        .is_ok()
+                                    {};
+                                }
+                            }
+
+                            drop(permit);
+                        });
                     };
-                    println!("Found one! Its number {:?}. Tag is: {:?}", gc, qrcode);
-                    tx.unbounded_send(qrcode).expect("Failed to send");
                 }
-
-                println!("hash is: {:?}", res);
-
-                let mut a = std::io::BufReader::new(img2);
-                let exifreader = exif::Reader::new();
-                let exif = if let Ok(exif) = exifreader.read_from_container(&mut a) {
-                    exif
-                } else {
-                    println!("Error: Could not read exif data from image.");
-                    return;
-                };
-
-                for f in exif.fields() {
-                    if tx
-                        .unbounded_send(format!(
-                            "{} {} {}",
-                            f.tag,
-                            f.ifd_num,
-                            f.display_value().with_unit(&exif)
-                        ))
-                        .is_ok()
-                    {};
-                }
-
-                drop(permit);
-            });
-        };
+            }
+        }
     }
 
     drop(tx);

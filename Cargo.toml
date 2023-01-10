@@ -3,7 +3,7 @@ name = "rustslinger"
 version = "0.1.0"
 edition = "2021"
 authors = ["Thomas Kessler <tom@rkessler.group>"]
-description = "rustslinger is a tool for scanning and analysing large image data sets stored in AWS S3 buckets."
+description = "rustslinger is a tool for scanning and analysing large image data sets stored on AWS S3 buckets."
 license = "MIT OR Apache-2.0"
 
 
@@ -25,5 +25,12 @@ kamadak-exif = "0.5.5"
 clap = {version = "4.0.32", features =["derive"]}
 thiserror = {version ="1"}
 anyhow = {version ="1"}
+
+[build]
+rustflags = ["-C target-cpu=native"]
+
+[profile.release]
+lto = true
+codegen-units = 1
 
 
