@@ -3,6 +3,22 @@
 
 **rustslinger** is a tool for scanning and analysing large image data sets stored in AWS S3 buckets. 
 
+'''
+rustslinger  --help
+
+rustslinger is a tool for scanning and analysing large image data sets stored in AWS S3 buckets.
+
+Usage: rustslinger [OPTIONS] --bucket <BUCKET>
+
+Options:
+  -b, --bucket <BUCKET>    aws s3 bucket
+  -p, --prefix <PREFIX>    aws s3 prefix
+  -f, --profile <PROFILE>  aws s3 profile
+  -l, --bucketlist         aws s3 bucket list
+  -h, --help               Print help information
+  -V, --version            Print version information
+'''
+
 ## Why?
 
 **rustslinger** is a fully functional, non-trivial, learning and experimentation application written to get familiar with the Rust programming language. 
@@ -10,7 +26,7 @@
 Key concepts and technologies used to develop **rustslinger** include:
 
 - Concurrency & Multithreading with async/await and threadpools using [futures](https://crates.io/crates/futures) and [Tokio](https://crates.io/crates/tokio)
-- AWS Rust SDK using [aws-sdk-s3](https://crates.io/crates/aws-sdk-s3) and [aws_config](https://crates.io/crates/aws-config)
+- AWS Rust SDK using [aws-sdk-s3](https://crates.io/crates/aws-sdk-s3) and [aws-config](https://crates.io/crates/aws-config)
 - QR Code Scanning using [rqrr](https://crates.io/crates/rqrr) and [image](https://crates.io/crates/image)
 - EXIF Metadata Extraction using [kamadak-exif](https://crates.io/crates/kamadak-exif) 
 - and more ...

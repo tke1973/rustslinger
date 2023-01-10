@@ -28,7 +28,9 @@ pub use error::RustslingerError;
 use anyhow::{bail, Result};
 
 /// rustslinger
-/// Fully functional learning and experimenting application. Entirely written in Rust.
+///
+/// rustslinger is a tool for scanning and analysing large image data sets stored in AWS S3 buckets.
+/// A fully functional, non-trivial, learning and experimentation application written to get familiar with the Rust programming language.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -173,7 +175,7 @@ async fn main() -> Result<()> {
 
     // This semaphore allows us to control the numnber of concurrent threads runnining in tppol.
     // Here we limit it to the number of CPUs available.
-    // At one point we may want to try if "Number of CPUs plus 1" gives us a better result.
+    // At one point we may want to try if "Number of CPUs plus 1" gives us a better performance.
     // Don't forget the in parallel we are still downloading files from aws s3 inside the Tokio runtime.
     let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
 

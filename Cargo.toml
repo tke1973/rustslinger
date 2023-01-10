@@ -3,7 +3,7 @@ name = "rustslinger"
 version = "0.1.0"
 edition = "2021"
 authors = ["Thomas Kessler <tom@rkessler.group>"]
-description = "Fully functional learning and experimenting application. Entirely written in Rust."
+description = "rustslinger is a tool for scanning and analysing large image data sets stored in AWS S3 buckets."
 license = "MIT OR Apache-2.0"
 
 
