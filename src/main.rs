@@ -1,7 +1,7 @@
-/*
- * Copyright Thomas Kessler <tom@kessler.group> All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0.
- */
+//
+// Copyright Thomas Kessler <tom@kessler.group> All Rights Reserved.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
 
 use clap::Parser;
 use std::env;

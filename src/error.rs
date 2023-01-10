@@ -1,3 +1,8 @@
+//
+// Copyright Thomas Kessler <tom@kessler.group> All Rights Reserved.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
