@@ -5,9 +5,9 @@
 
 ## Why?
 
-**rustslinger** is a fully functional, non-trivial learning and experimenting application written to get familiar with the Rust programming language. 
+**rustslinger** is a fully functional, non-trivial, learning and experimentation application written to get familiar with the Rust programming language. 
 
-Key concepts and technologies used in **rustslinger** include:
+Key concepts and technologies used to develop **rustslinger** include:
 
 - Conncurrency with async/await
 - Mutlitheading 
