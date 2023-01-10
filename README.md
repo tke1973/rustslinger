@@ -3,6 +3,9 @@
 
 **rustslinger** is a tool for scanning and analysing large image data sets stored on AWS S3 buckets. 
 
+**_It is in pre-alpha state. Use with caution and entirely at your own risk!_**
+
+
 ```
 rustslinger  --help
 
