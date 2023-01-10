@@ -3,7 +3,7 @@
 
 **rustslinger** is a tool for scanning and analysing large image data sets stored in AWS S3 buckets. 
 
-'''
+```
 rustslinger  --help
 
 rustslinger is a tool for scanning and analysing large image data sets stored in AWS S3 buckets.
@@ -17,7 +17,7 @@ Options:
   -l, --bucketlist         aws s3 bucket list
   -h, --help               Print help information
   -V, --version            Print version information
-'''
+```
 
 ## Why?
 
