@@ -4,6 +4,7 @@
 //
 
 use clap::Parser;
+
 use std::dbg;
 use std::env;
 use std::fmt::Write;
@@ -14,11 +15,13 @@ use image::io::Reader as ImageReader;
 use std::io::Cursor;
 
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 
-use futures::channel::mpsc;
-use futures::executor::ThreadPool;
-use futures::stream::StreamExt;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Semaphore;
+use tokio::task;
+use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
@@ -51,6 +54,176 @@ struct Args {
     /// aws s3 bucket list
     #[arg(short = 'l', long, required = false)]
     bucketlist: bool,
+}
+
+// test function for downloading all files using tokio runtime
+
+async fn download_s3file(
+    client: Client,
+    key: String,
+    bucket: String,
+    semaphore: Arc<Semaphore>,
+) -> Option<bytes::Bytes> {
+    let permit = if let Ok(permit) = semaphore.acquire_owned().await {
+        permit
+    } else {
+        return None;
+    };
+    let object_response =
+        if let Ok(object_response) = client.get_object().bucket(bucket).key(key).send().await {
+            object_response
+        } else {
+            drop(permit);
+            return None;
+        };
+
+    if let Ok(object_response_body) = object_response.body.collect().await {
+        drop(permit);
+        Some(object_response_body.into_bytes())
+    } else {
+        drop(permit);
+        None
+    }
+}
+
+async fn download_files_tasker(client: Client, bucket: &str) -> JoinSet<Option<bytes::Bytes>> {
+    let mut downloadfile_joinset = JoinSet::new();
+    let semaphore = Arc::new(Semaphore::new(num_cpus::get() * 10));
+
+    // Get a list of all objects in the specified s3 bucket paginateing.
+    let mut list_s3objects_page = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .into_paginator()
+        .send();
+
+    // Iterate over all keys in the s3 bucket.
+    while let Some(list_s3objects) = list_s3objects_page.next().await {
+        if let Ok(s3objects) = list_s3objects {
+            if let Some(s3objects_contents) = s3objects.contents() {
+                for object in s3objects_contents {
+                    let client = client.clone();
+                    let key = object.key().unwrap().to_string().clone();
+                    let bucket = bucket.to_string().clone();
+                    let semaphore = semaphore.clone();
+
+                    downloadfile_joinset.spawn(download_s3file(client, key, bucket, semaphore));
+                }
+            }
+        }
+    }
+
+    downloadfile_joinset
+}
+
+fn analytics(
+    image_bytes: bytes::Bytes,
+    tx: UnboundedSender<String>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    println!("off to the races ...");
+
+    let mut hash = Sha256::new();
+    hash.update(&image_bytes);
+    let hash = hash.finalize();
+
+    let img2 = Cursor::new(image_bytes.clone());
+
+    // print res as serialized hex string
+    let mut hash_string = String::new();
+    for byte in hash {
+        std::write!(&mut hash_string, "{:02x}", byte).unwrap();
+    }
+
+    let image_reader = if let Ok(image_reader) =
+        ImageReader::new(Cursor::new(&image_bytes)).with_guessed_format()
+    {
+        image_reader
+    } else {
+        // This error is unrecoverable and the thread will therefore not produce a result.
+        // We end the thread to free CPU and memory resoucres for the next thread.
+        return;
+    };
+
+    let image_decoded = if let Ok(image_decoded) = image_reader.decode() {
+        image_decoded.to_luma8()
+    } else {
+        // This error is unrecoverable and the thread  will therefore not produce a result.
+        // We end the thread to free CPU and memory resoucres for the next thread.
+        return;
+    };
+
+    let mut image_prepared = rqrr::PreparedImage::prepare(image_decoded);
+    let grids = image_prepared.detect_grids();
+
+    let mut gc = 0;
+    for g in grids {
+        gc += 1;
+
+        let qrcode_result = g.decode();
+
+        let qrcode = match qrcode_result {
+            Ok((_meta, content)) => content,
+            Err(_error) => "did got an error while decoding QR code".to_string(),
+        };
+        dbg!(gc, &qrcode);
+        tx.send(qrcode).unwrap();
+    }
+
+    dbg!(hash_string);
+
+    let mut a = std::io::BufReader::new(img2);
+    let exifreader = exif::Reader::new();
+    let exif = if let Ok(exif) = exifreader.read_from_container(&mut a) {
+        exif
+    } else {
+        println!("Error: Could not read exif data from image.");
+        return;
+    };
+
+    for f in exif.fields() {
+        if f.tag.to_string().eq(&"UserComment".to_string())
+            && tx
+                .send(format!("{}, {}", f.tag, f.display_value().with_unit(&exif)))
+                .is_ok()
+        {}
+    }
+
+    drop(permit);
+}
+
+async fn image_analysis_tasker(
+    mut downloadfile_joinset: JoinSet<Option<bytes::Bytes>>,
+    tx: UnboundedSender<String>,
+) {
+    // This semaphore allows us to control the numnber of concurrent threads runnining in tppol.
+    // Here we limit it to the number of CPUs available.
+    // At one point we may want to try if "Number of CPUs plus 1" gives us a better performance.
+    // Don't forget the in parallel we are still downloading files from aws s3 inside the Tokio runtime.
+
+    let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
+
+    let mut joinset_blocking = Vec::new();
+
+    while let Some(image_join_handle) = downloadfile_joinset.join_next().await {
+        if let Ok(Some(image_bytes)) = image_join_handle {
+            //let image_analysis_handle = image_analysis_tasker(image_analysis_handle, ressss);
+            let tx = tx.clone();
+            let semaphore = semaphore.clone();
+
+            let permit = if let Ok(permit) = semaphore.acquire_owned().await {
+                permit
+            } else {
+                return;
+            };
+
+            joinset_blocking.push(task::spawn_blocking(move || {
+                analytics(image_bytes, tx, permit);
+            }));
+        }
+
+        // ...
+    }
 }
 
 // List all available s3 buckets
@@ -123,148 +296,16 @@ async fn main() -> Result<()> {
         bail!("Can't list s3 buckets.");
     };
 
-    // Get a list of all objects in the specified s3 bucket  paginateing.
-    let mut list_s3objects = client
-        .list_objects_v2()
-        .bucket(args.bucket.clone())
-        .into_paginator()
-        .send();
+    let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let tpool = if let Ok(tpool) = ThreadPool::new() {
-        tpool
-    } else {
-        bail!("Can't create thread pool.")
-    };
+    println!("Downloading files from bucket {}.", args.bucket);
+    let handle_data = download_files_tasker(client.clone(), &args.bucket).await;
 
-    let (tx, mut rx) = mpsc::unbounded::<String>();
+    println!("Analyzing files.");
+    image_analysis_tasker(handle_data, tx).await;
 
-    // This semaphore allows us to control the numnber of concurrent threads runnining in tppol.
-    // Here we limit it to the number of CPUs available.
-    // At one point we may want to try if "Number of CPUs plus 1" gives us a better performance.
-    // Don't forget the in parallel we are still downloading files from aws s3 inside the Tokio runtime.
-    let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
-
-    while let Some(s3objects) = list_s3objects.next().await {
-        if let Ok(s3objects) = s3objects {
-            if let Some(s3objects_contents) = s3objects.contents() {
-                let mut fetches =
-                    futures::stream::iter(s3objects_contents.iter().map(|path| async {
-                        let object_path_key = path.key()?;
-
-                        let object_response = if let Ok(object_response) = client
-                            .get_object()
-                            .bucket(args.bucket.clone())
-                            .key(object_path_key)
-                            .send()
-                            .await
-                        {
-                            object_response
-                        } else {
-                            return None;
-                        };
-
-                        if let Ok(object_response_body) = object_response.body.collect().await {
-                            Some(object_response_body.into_bytes())
-                        } else {
-                            None
-                        }
-                    }))
-                    .buffer_unordered(30);
-
-                while let Some(object_resp_body_bytes) = fetches.next().await {
-                    if let Some(image) = object_resp_body_bytes {
-                        let tx = tx.clone();
-                        let permit = if let Ok(permit) = semaphore.clone().acquire_owned().await {
-                            permit
-                        } else {
-                            bail!("Error: Could not acquire semaphore permit. Exiting.")
-                        };
-
-                        let img2 = Cursor::new(image.clone());
-
-                        tpool.spawn_ok(async move {
-                            let mut hash = Sha256::new();
-                            hash.update(&image);
-                            let hash = hash.finalize();
-
-                            // print res as serialized hex string
-                            let mut hash_string = String::new();
-                            for byte in hash {
-                                std::write!(&mut hash_string, "{:02x}", byte).unwrap();
-                            }
-
-                            let image_reader = if let Ok(image_reader) =
-                                ImageReader::new(Cursor::new(&image)).with_guessed_format()
-                            {
-                                image_reader
-                            } else {
-                                // This error is unrecoverable and the thread will therefore not produce a result.
-                                // We end the thread to free CPU and memory resoucres for the next thread.
-                                return;
-                            };
-
-                            let image_decoded = if let Ok(image_decoded) = image_reader.decode() {
-                                image_decoded.to_luma8()
-                            } else {
-                                // This error is unrecoverable and the thread  will therefore not produce a result.
-                                // We end the thread to free CPU and memory resoucres for the next thread.
-                                return;
-                            };
-
-                            let mut image_prepared = rqrr::PreparedImage::prepare(image_decoded);
-                            let grids = image_prepared.detect_grids();
-
-                            let mut gc = 0;
-                            for g in grids {
-                                gc += 1;
-
-                                let qrcode_result = g.decode();
-
-                                let qrcode = match qrcode_result {
-                                    Ok((_meta, content)) => content,
-                                    Err(_error) => {
-                                        "did got an error while decoding QR code".to_string()
-                                    }
-                                };
-                                dbg!(gc, &qrcode);
-                                tx.unbounded_send(qrcode).expect("Failed to send");
-                            }
-
-                            dbg!(hash_string);
-
-                            let mut a = std::io::BufReader::new(img2);
-                            let exifreader = exif::Reader::new();
-                            let exif = if let Ok(exif) = exifreader.read_from_container(&mut a) {
-                                exif
-                            } else {
-                                println!("Error: Could not read exif data from image.");
-                                return;
-                            };
-
-                            for f in exif.fields() {
-                                if f.tag.to_string().eq(&"UserComment".to_string()) {
-                                    if tx
-                                        .unbounded_send(format!(
-                                            "{}, {}",
-                                            f.tag,
-                                            f.display_value().with_unit(&exif)
-                                        ))
-                                        .is_ok()
-                                    {};
-                                }
-                            }
-
-                            drop(permit);
-                        });
-                    };
-                }
-            }
-        }
-    }
-
-    drop(tx);
-
-    while let Some(ss) = rx.next().await {
+    println!("Waiting for results.");
+    while let Some(ss) = rx.recv().await {
         println!("{:?}", ss);
     }
 
