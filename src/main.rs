@@ -56,6 +56,11 @@ struct Args {
     bucketlist: bool,
 }
 
+struct DownloadFile {
+    data: bytes::Bytes,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 // test function for downloading all files using tokio runtime
 
 async fn download_s3file(
@@ -63,7 +68,7 @@ async fn download_s3file(
     key: String,
     bucket: String,
     semaphore: Arc<Semaphore>,
-) -> Option<bytes::Bytes> {
+) -> Option<DownloadFile> {
     let permit = if let Ok(permit) = semaphore.acquire_owned().await {
         permit
     } else {
@@ -78,15 +83,18 @@ async fn download_s3file(
         };
 
     if let Ok(object_response_body) = object_response.body.collect().await {
-        drop(permit);
-        Some(object_response_body.into_bytes())
+        let download_file: DownloadFile = DownloadFile {
+            data: object_response_body.into_bytes(),
+            permit: permit,
+        };
+        Some(download_file)
     } else {
         drop(permit);
-        None
+        return None;
     }
 }
 
-async fn download_files_tasker(client: Client, bucket: &str) -> JoinSet<Option<bytes::Bytes>> {
+async fn download_files_tasker(client: Client, bucket: &str) -> JoinSet<Option<DownloadFile>> {
     let mut downloadfile_joinset = JoinSet::new();
     let semaphore = Arc::new(Semaphore::new(num_cpus::get() * 10));
 
@@ -193,7 +201,7 @@ fn analytics(
 }
 
 async fn image_analysis_tasker(
-    mut downloadfile_joinset: JoinSet<Option<bytes::Bytes>>,
+    mut downloadfile_joinset: JoinSet<Option<DownloadFile>>,
     tx: UnboundedSender<String>,
 ) {
     // This semaphore allows us to control the numnber of concurrent threads runnining in tppol.
@@ -217,8 +225,10 @@ async fn image_analysis_tasker(
                 return;
             };
 
+            drop(image_bytes.permit);
+
             joinset_blocking.push(task::spawn_blocking(move || {
-                analytics(image_bytes, tx, permit);
+                analytics(image_bytes.data, tx, permit);
             }));
         }
 
