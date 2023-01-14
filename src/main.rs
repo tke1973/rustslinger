@@ -57,8 +57,18 @@ struct Args {
 }
 
 struct DownloadFile {
+    key: String,
     data: bytes::Bytes,
     permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[derive(Debug)]
+struct AnalyticsResultSet {
+    key: String,
+    hash: String,
+    qr_code: String,
+    qr_quality: String,
+    gr_source: String,
 }
 
 // test function for downloading all files using tokio runtime
@@ -75,7 +85,7 @@ async fn download_s3file(
         return None;
     };
     let object_response =
-        if let Ok(object_response) = client.get_object().bucket(bucket).key(key).send().await {
+        if let Ok(object_response) = client.get_object().bucket(bucket).key(&key).send().await {
             object_response
         } else {
             drop(permit);
@@ -84,6 +94,7 @@ async fn download_s3file(
 
     if let Ok(object_response_body) = object_response.body.collect().await {
         let download_file: DownloadFile = DownloadFile {
+            key: key,
             data: object_response_body.into_bytes(),
             permit,
         };
@@ -125,8 +136,9 @@ async fn download_files_tasker(client: Client, bucket: &str) -> JoinSet<Option<D
 }
 
 fn analytics(
+    key: String,
     image_bytes: bytes::Bytes,
-    tx: UnboundedSender<String>,
+    tx: UnboundedSender<AnalyticsResultSet>,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let mut hash = Sha256::new();
@@ -152,7 +164,8 @@ fn analytics(
     };
 
     let image_decoded = if let Ok(image_decoded) = image_reader.decode() {
-        image_decoded.to_luma8()
+        let a = image_decoded.to_luma8();
+        image::imageops::resize(&a, 800, 600, image::imageops::FilterType::Nearest)
     } else {
         // This error is unrecoverable and the thread  will therefore not produce a result.
         // We end the thread to free CPU and memory resoucres for the next thread.
@@ -163,14 +176,26 @@ fn analytics(
     let grids = image_prepared.detect_grids();
 
     for g in grids {
-        let qrcode_result = g.decode();
-
-        let qrcode = match qrcode_result {
-            Ok((_meta, content)) => content,
-            Err(_error) => "did got an error while decoding QR code".to_string(),
+        let message = match g.decode() {
+            Ok((_metadata, qrcode)) => AnalyticsResultSet {
+                key: key.clone(),
+                hash: hash_string.clone(),
+                qr_code: qrcode,
+                qr_quality: "OK".to_string(),
+                gr_source: "rqrr".to_string(),
+            },
+            Err(error) => AnalyticsResultSet {
+                key: key.clone(),
+                hash: hash_string.clone(),
+                qr_code: "DECODER_ERROR".to_string(),
+                qr_quality: error.to_string(),
+                gr_source: "rqrr".to_string(),
+            },
         };
 
-        tx.send(qrcode).unwrap();
+        if tx.send(message).is_err() {
+            // do something!
+        }
     }
 
     let mut a = std::io::BufReader::new(img2);
@@ -183,11 +208,19 @@ fn analytics(
     };
 
     for f in exif.fields() {
-        if f.tag.to_string().eq(&"UserComment".to_string())
-            && tx
-                .send(format!("{}, {}", f.tag, f.display_value().with_unit(&exif)))
-                .is_ok()
-        {}
+        if f.tag.to_string().eq(&"UserComment".to_string()) {
+            let message = AnalyticsResultSet {
+                key: key.clone(),
+                hash: hash_string.clone(),
+                qr_code: f.value.display_as(f.tag).to_string(),
+                qr_quality: "OK".to_string(),
+                gr_source: "EXIFUserComment".to_string(),
+            };
+
+            if tx.send(message).is_err() {
+                // do something!
+            }
+        }
     }
 
     drop(permit);
@@ -195,7 +228,7 @@ fn analytics(
 
 async fn image_analysis_tasker(
     mut downloadfile_joinset: JoinSet<Option<DownloadFile>>,
-    tx: UnboundedSender<String>,
+    tx: UnboundedSender<AnalyticsResultSet>,
 ) {
     // This semaphore allows us to control the numnber of concurrent threads runnining in tppol.
     // Here we limit it to the number of CPUs available.
@@ -221,7 +254,7 @@ async fn image_analysis_tasker(
             drop(image_bytes.permit);
 
             joinset_blocking.push(task::spawn_blocking(move || {
-                analytics(image_bytes.data, tx, permit);
+                analytics(image_bytes.key, image_bytes.data, tx, permit);
             }));
         }
 
@@ -299,17 +332,19 @@ async fn main() -> Result<()> {
         bail!("Can't list s3 buckets.");
     };
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
-
     println!("Setup streaming files from bucket {}.", args.bucket);
     let handle_data = download_files_tasker(client.clone(), &args.bucket).await;
 
     println!("Analyzing files.");
+    let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(image_analysis_tasker(handle_data, tx));
 
     println!("Waiting for results.");
     while let Some(ss) = rx.recv().await {
-        println!("{:?}", ss);
+        println!(
+            "{}, {}, {}, {}, {}",
+            ss.key, ss.hash, ss.qr_code, ss.qr_quality, ss.gr_source
+        );
     }
 
     println!("Done with it!");
