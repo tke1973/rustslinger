@@ -68,7 +68,7 @@ struct AnalyticsResultSet {
     hash: String,
     qr_code: String,
     qr_quality: String,
-    gr_source: String,
+    qr_source: String,
 }
 
 // test function for downloading all files using tokio runtime
@@ -182,14 +182,14 @@ fn analytics(
                 hash: hash_string.clone(),
                 qr_code: qrcode,
                 qr_quality: "OK".to_string(),
-                gr_source: "rqrr".to_string(),
+                qr_source: "rqrr".to_string(),
             },
             Err(error) => AnalyticsResultSet {
                 key: key.clone(),
                 hash: hash_string.clone(),
                 qr_code: "DECODER_ERROR".to_string(),
                 qr_quality: error.to_string(),
-                gr_source: "rqrr".to_string(),
+                qr_source: "rqrr".to_string(),
             },
         };
 
@@ -214,7 +214,7 @@ fn analytics(
                 hash: hash_string.clone(),
                 qr_code: f.value.display_as(f.tag).to_string(),
                 qr_quality: "OK".to_string(),
-                gr_source: "EXIFUserComment".to_string(),
+                qr_source: "EXIFUserComment".to_string(),
             };
 
             if tx.send(message).is_err() {
@@ -340,10 +340,12 @@ async fn main() -> Result<()> {
     tokio::spawn(image_analysis_tasker(handle_data, tx));
 
     println!("Waiting for results.");
-    while let Some(ss) = rx.recv().await {
+    let mut rc: u128 = 0;
+    while let Some(result) = rx.recv().await {
+        rc += 1;
         println!(
-            "{}, {}, {}, {}, {}",
-            ss.key, ss.hash, ss.qr_code, ss.qr_quality, ss.gr_source
+            "{}, {}, {}, {}, {}, {}",
+            rc, result.key, result.hash, result.qr_code, result.qr_quality, result.qr_source
         );
     }
 
