@@ -28,7 +28,7 @@ thiserror = {version ="1"}
 anyhow = {version ="1"}
 
 [build]
-rustflags = ["-C target-cpu=native"]
+
 
 [profile.release]
 lto = true
