@@ -5,7 +5,7 @@
 
 use clap::Parser;
 
-use std::dbg;
+//use std::dbg;
 use std::env;
 use std::fmt::Write;
 
@@ -85,12 +85,12 @@ async fn download_s3file(
     if let Ok(object_response_body) = object_response.body.collect().await {
         let download_file: DownloadFile = DownloadFile {
             data: object_response_body.into_bytes(),
-            permit: permit,
+            permit,
         };
         Some(download_file)
     } else {
         drop(permit);
-        return None;
+        None
     }
 }
 
@@ -129,8 +129,6 @@ fn analytics(
     tx: UnboundedSender<String>,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) {
-    println!("off to the races ...");
-
     let mut hash = Sha256::new();
     hash.update(&image_bytes);
     let hash = hash.finalize();
@@ -164,21 +162,16 @@ fn analytics(
     let mut image_prepared = rqrr::PreparedImage::prepare(image_decoded);
     let grids = image_prepared.detect_grids();
 
-    let mut gc = 0;
     for g in grids {
-        gc += 1;
-
         let qrcode_result = g.decode();
 
         let qrcode = match qrcode_result {
             Ok((_meta, content)) => content,
             Err(_error) => "did got an error while decoding QR code".to_string(),
         };
-        dbg!(gc, &qrcode);
+
         tx.send(qrcode).unwrap();
     }
-
-    dbg!(hash_string);
 
     let mut a = std::io::BufReader::new(img2);
     let exifreader = exif::Reader::new();
@@ -308,11 +301,11 @@ async fn main() -> Result<()> {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    println!("Downloading files from bucket {}.", args.bucket);
+    println!("Setup streaming files from bucket {}.", args.bucket);
     let handle_data = download_files_tasker(client.clone(), &args.bucket).await;
 
     println!("Analyzing files.");
-    image_analysis_tasker(handle_data, tx).await;
+    tokio::spawn(image_analysis_tasker(handle_data, tx));
 
     println!("Waiting for results.");
     while let Some(ss) = rx.recv().await {
