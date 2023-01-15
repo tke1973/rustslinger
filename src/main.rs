@@ -7,8 +7,6 @@ use clap::Parser;
 
 use std::env;
 
-use tokio::sync::mpsc;
-
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
 use aws_sdk_s3::Client;
@@ -20,6 +18,7 @@ mod download;
 pub use crate::download::DownloadFile;
 
 mod analysis;
+pub use crate::analysis::AnalyticsResult;
 pub use crate::analysis::AnalyticsResultSet;
 
 use anyhow::{bail, Result};
@@ -124,12 +123,12 @@ async fn main() -> Result<()> {
     let handle_data = crate::download::download_files_tasker(client.clone(), &args.bucket).await;
 
     println!("Analyzing files.");
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    tokio::spawn(crate::analysis::image_analysis_tasker(handle_data, tx));
+
+    let mut analysis_results = AnalyticsResult::new(handle_data).await;
 
     println!("Waiting for results.");
     let mut rc: u128 = 0;
-    while let Some(result) = rx.recv().await {
+    while let Some(result) = analysis_results.get_next().await {
         rc += 1;
         println!(
             "{}, {}, {}, {}, {}, {}",

@@ -27,9 +27,6 @@ clap = {version = "4.0.32", features =["derive"]}
 thiserror = {version ="1"}
 anyhow = {version ="1"}
 
-[build]
-
-
 [profile.release]
 lto = true
 codegen-units = 1
