@@ -2,7 +2,7 @@
 // Copyright Thomas Kessler <tom@kessler.group> All Rights Reserved.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-
+use anyhow::{bail, Result};
 use clap::Parser;
 
 use std::env;
@@ -18,10 +18,7 @@ mod download;
 pub use crate::download::DownloadFile;
 
 mod analysis;
-pub use crate::analysis::AnalyticsResult;
-pub use crate::analysis::AnalyticsResultSet;
-
-use anyhow::{bail, Result};
+pub use crate::analysis::{AnalyticsResult, AnalyticsResultSet};
 
 /// rustslinger
 ///

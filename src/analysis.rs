@@ -137,12 +137,9 @@ impl AnalyticsResult {
 
         let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
 
-        let mut joinset_blocking = Vec::new();
-
         tokio::spawn(async move {
             while let Some(image_join_handle) = downloadfile_joinset.join_next().await {
                 if let Ok(Some(image_bytes)) = image_join_handle {
-                    //let image_analysis_handle = image_analysis_tasker(image_analysis_handle, ressss);
                     let tx = tx.clone();
                     let semaphore = semaphore.clone();
 
@@ -154,9 +151,9 @@ impl AnalyticsResult {
 
                     drop(image_bytes.permit);
 
-                    joinset_blocking.push(task::spawn_blocking(move || {
+                    task::spawn_blocking(move || {
                         Self::analytics(image_bytes.key, image_bytes.data, tx, permit);
-                    }));
+                    });
                 }
             }
         });
