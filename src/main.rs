@@ -80,6 +80,7 @@ async fn list_s3buckets(client: &Client) -> Result<(), RustslingerError> {
 // use sha2 to calculate the hash
 #[tokio::main]
 async fn main() -> Result<()> {
+    console_subscriber::init();
     // get command line options
     let args = Args::parse();
 

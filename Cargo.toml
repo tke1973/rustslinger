@@ -26,6 +26,7 @@ kamadak-exif = "0.5.5"
 clap = {version = "4.0.32", features =["derive"]}
 thiserror = {version ="1"}
 anyhow = {version ="1"}
+console-subscriber = "0.1.8"
 
 [profile.release]
 lto = true
