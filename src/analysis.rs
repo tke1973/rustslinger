@@ -10,6 +10,21 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// ---------------------------------------------------------------------------
+// AnalyticsConfig — shared, immutable configuration for every analysis task
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+pub struct AnalyticsConfig {
+    pub model_path: Option<PathBuf>,
+    #[cfg(feature = "dynamsoft")]
+    pub dynamsoft_license: Option<String>,
+    #[cfg(feature = "dynamsoft")]
+    pub dynamsoft_endpoint: Option<String>,
+    #[cfg(feature = "dynamsoft")]
+    pub dynamsoft_only: bool,
+}
+
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -186,6 +201,105 @@ fn scan_qr_wechat(
 }
 
 // ---------------------------------------------------------------------------
+// Dynamsoft backend — REST API, compiled in with --features dynamsoft
+// Runs after rxing + wechat (or alone when dynamsoft_only = true).
+// Requires a running Dynamsoft Barcode Reader service and a valid license.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "dynamsoft")]
+fn extract_barcode_texts(json: &serde_json::Value) -> Vec<String> {
+    // Handles three common Dynamsoft REST response shapes.
+    // Shape 1: {"TextResult":[{"BarcodeText":"..."}]}   (DBR REST server)
+    // Shape 2: {"barcodeResults":[{"text":"..."}]}
+    // Shape 3: {"results":[{"barcodeText":"..."}]}
+    let candidates = [
+        json.get("TextResult")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("BarcodeText")?.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            }),
+        json.get("barcodeResults")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("text")?.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            }),
+        json.get("results")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("barcodeText")?.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            }),
+    ];
+
+    candidates
+        .into_iter()
+        .flatten()
+        .next()
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "dynamsoft")]
+fn scan_qr_dynamsoft(
+    image_bytes: &bytes::Bytes,
+    key: &str,
+    hash_string: &str,
+    license: &str,
+    endpoint: &str,
+    tx: &UnboundedSender<AnalyticsResultSet>,
+    emitted: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    let image_b64 =
+        base64::engine::general_purpose::STANDARD.encode(image_bytes.as_ref());
+
+    let payload = serde_json::json!({
+        "imageBase64": image_b64,
+        "licenseKey": license,
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let response = client.post(endpoint).json(&payload).send()?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Dynamsoft API returned status {}",
+            response.status()
+        );
+    }
+
+    let json: serde_json::Value = response.json()?;
+    let texts = extract_barcode_texts(&json);
+
+    for text in texts {
+        if emitted.insert(text.clone()) {
+            if tx
+                .send(AnalyticsResultSet {
+                    key: key.to_string(),
+                    hash: hash_string.to_string(),
+                    qr_code: text,
+                    qr_quality: "OK".to_string(),
+                    qr_source: "dynamsoft".to_string(),
+                })
+                .is_err()
+            {
+                error!(key, "result channel closed");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Core analytics — runs rxing then (optionally) wechat, union with dedup
 // ---------------------------------------------------------------------------
 
@@ -195,26 +309,11 @@ impl AnalyticsResult {
         image_bytes: bytes::Bytes,
         tx: UnboundedSender<AnalyticsResultSet>,
         _permit: tokio::sync::OwnedSemaphorePermit,
-        _model_path: Arc<Option<PathBuf>>,
+        _config: Arc<AnalyticsConfig>,
     ) {
         let hash_string = hex::encode(Sha256::digest(&image_bytes));
 
-        // Tracks all QR codes emitted for this image — shared across backends
-        // so each unique code is sent exactly once.
-        let mut emitted: HashSet<String> = HashSet::new();
-
-        if let Err(e) = scan_qr_rxing(&image_bytes, &key, &hash_string, &tx, &mut emitted) {
-            warn!(key = key, error = %e, "rxing scan failed");
-        }
-
-        #[cfg(feature = "wechat")]
-        if let Err(e) =
-            scan_qr_wechat(&image_bytes, &key, &hash_string, &_model_path, &tx, &mut emitted)
-        {
-            warn!(key = key, error = %e, "wechat_qrcode scan failed");
-        }
-
-        // EXIF is independent — absence is normal, not an error.
+        // EXIF is always extracted first — independent of QR scanning.
         let mut buf = std::io::BufReader::new(Cursor::new(&image_bytes));
         if let Ok(exif) = exif::Reader::new().read_from_container(&mut buf) {
             for f in exif.fields() {
@@ -229,15 +328,63 @@ impl AnalyticsResult {
                 }
             }
         }
+
+        // Tracks all QR codes emitted for this image — shared across backends
+        // so each unique code is sent exactly once.
+        let mut emitted: HashSet<String> = HashSet::new();
+
+        // Determine whether Dynamsoft-only mode is active.
+        #[cfg(feature = "dynamsoft")]
+        let dynamsoft_only = _config.dynamsoft_only;
+        #[cfg(not(feature = "dynamsoft"))]
+        let dynamsoft_only = false;
+
+        if !dynamsoft_only {
+            if let Err(e) = scan_qr_rxing(&image_bytes, &key, &hash_string, &tx, &mut emitted) {
+                warn!(key = key, error = %e, "rxing scan failed");
+            }
+
+            #[cfg(feature = "wechat")]
+            if let Err(e) = scan_qr_wechat(
+                &image_bytes,
+                &key,
+                &hash_string,
+                &_config.model_path,
+                &tx,
+                &mut emitted,
+            ) {
+                warn!(key = key, error = %e, "wechat_qrcode scan failed");
+            }
+        }
+
+        #[cfg(feature = "dynamsoft")]
+        if let (Some(license), Some(endpoint)) = (
+            _config.dynamsoft_license.as_deref(),
+            _config.dynamsoft_endpoint.as_deref(),
+        ) {
+            if let Err(e) = scan_qr_dynamsoft(
+                &image_bytes,
+                &key,
+                &hash_string,
+                license,
+                endpoint,
+                &tx,
+                &mut emitted,
+            ) {
+                warn!(key = key, error = %e, "dynamsoft scan failed");
+            }
+        } else if _config.dynamsoft_only {
+            warn!(key = key, "dynamsoft_only set but license/endpoint not configured — no scan");
+        }
     }
 
     pub async fn new(
         mut downloadfile_joinset: JoinSet<Result<DownloadFile, RustslingerError>>,
-        model_path: Option<PathBuf>,
+        config: AnalyticsConfig,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let semaphore = Arc::new(Semaphore::new(num_cpus::get()));
-        let model_path = Arc::new(model_path);
+        let config = Arc::new(config);
 
         tokio::spawn(async move {
             while let Some(join_result) = downloadfile_joinset.join_next().await {
@@ -245,7 +392,7 @@ impl AnalyticsResult {
                     Ok(Ok(file)) => {
                         let tx = tx.clone();
                         let semaphore = semaphore.clone();
-                        let model_path = model_path.clone();
+                        let config = config.clone();
 
                         let permit = match semaphore.acquire_owned().await {
                             Ok(p) => p,
@@ -255,7 +402,7 @@ impl AnalyticsResult {
                         drop(file.permit);
 
                         task::spawn_blocking(move || {
-                            Self::analytics(file.key, file.data, tx, permit, model_path);
+                            Self::analytics(file.key, file.data, tx, permit, config);
                         });
                     }
                     Ok(Err(e)) => warn!(error = %e, "download failed, skipping"),
@@ -285,6 +432,10 @@ mod tests {
     use tokio::sync::Semaphore;
     use tokio::task::JoinSet;
     use crate::{DownloadFile, RustslingerError};
+
+    fn default_config() -> AnalyticsConfig {
+        AnalyticsConfig::default()
+    }
 
     fn make_file(key: &str, data: Vec<u8>) -> DownloadFile {
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
@@ -340,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn empty_joinset_closes_channel() {
         let joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             drain(&mut result),
@@ -361,7 +512,7 @@ mod tests {
                 reason: "not found".to_string(),
             })
         });
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             drain(&mut result),
@@ -375,7 +526,7 @@ mod tests {
     async fn invalid_image_bytes_produce_no_results() {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async { Ok(make_file("corrupt.jpg", vec![0u8; 256])) });
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             drain(&mut result),
@@ -391,7 +542,7 @@ mod tests {
     async fn valid_image_no_qr_no_exif_produces_no_results() {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async { Ok(make_file("blank.png", solid_png())) });
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             drain(&mut result),
@@ -409,7 +560,7 @@ mod tests {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async move { Ok(make_file("qr.png", qr_png(content))) });
 
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             drain(&mut result),
@@ -436,7 +587,7 @@ mod tests {
         joinset.spawn(async move { Ok(make_file("a.png", d1)) });
         joinset.spawn(async move { Ok(make_file("b.png", d2)) });
 
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             drain(&mut result),
@@ -487,7 +638,7 @@ mod tests {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async move { Ok(make_file("qr.png", qr_png(content))) });
 
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             drain(&mut result),
@@ -512,7 +663,7 @@ mod tests {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async { Ok(make_file("blank.png", solid_png())) });
 
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             drain(&mut result),
@@ -528,7 +679,7 @@ mod tests {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async { Ok(make_file("corrupt.jpg", vec![0u8; 256])) });
 
-        let mut result = AnalyticsResult::new(joinset, None).await;
+        let mut result = AnalyticsResult::new(joinset, default_config()).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             drain(&mut result),
@@ -536,5 +687,44 @@ mod tests {
         .await
         .expect("timed out");
         assert!(out.is_empty());
+    }
+
+    // --- dynamsoft feature: extract_barcode_texts covers all response shapes ---
+
+    #[cfg(feature = "dynamsoft")]
+    #[test]
+    fn extract_barcode_texts_dbr_shape() {
+        let json = serde_json::json!({
+            "TextResult": [
+                {"BarcodeText": "hello"},
+                {"BarcodeText": "world"},
+            ]
+        });
+        assert_eq!(extract_barcode_texts(&json), vec!["hello", "world"]);
+    }
+
+    #[cfg(feature = "dynamsoft")]
+    #[test]
+    fn extract_barcode_texts_barcode_results_shape() {
+        let json = serde_json::json!({
+            "barcodeResults": [{"text": "abc"}]
+        });
+        assert_eq!(extract_barcode_texts(&json), vec!["abc"]);
+    }
+
+    #[cfg(feature = "dynamsoft")]
+    #[test]
+    fn extract_barcode_texts_results_shape() {
+        let json = serde_json::json!({
+            "results": [{"barcodeText": "xyz"}]
+        });
+        assert_eq!(extract_barcode_texts(&json), vec!["xyz"]);
+    }
+
+    #[cfg(feature = "dynamsoft")]
+    #[test]
+    fn extract_barcode_texts_unknown_shape_returns_empty() {
+        let json = serde_json::json!({"unknown": "field"});
+        assert!(extract_barcode_texts(&json).is_empty());
     }
 }

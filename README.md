@@ -19,6 +19,9 @@ Options:
   -f, --profile <PROFILE>      aws s3 profile
   -l, --bucketlist             aws s3 bucket list
   -m, --model-path <PATH>      path to wechat_qrcode model files directory
+      --dynamsoft-license      Dynamsoft Barcode Reader license key (--features dynamsoft)
+      --dynamsoft-endpoint     Dynamsoft REST API endpoint URL (--features dynamsoft)
+      --dynamsoft-only         use Dynamsoft only — skip rxing and wechat (--features dynamsoft)
   -h, --help                   Print help information
   -V, --version                Print version information
 ```
@@ -31,7 +34,7 @@ Key concepts and technologies used to develop **rustslinger** include:
 
 - Concurrency & Multithreading with async/await and threadpools using [futures](https://crates.io/crates/futures) and [tokio](https://crates.io/crates/tokio)
 - AWS Rust SDK using [aws-sdk-s3](https://crates.io/crates/aws-sdk-s3) and [aws-config](https://crates.io/crates/aws-config)
-- QR Code Scanning using [rxing](https://crates.io/crates/rxing) (pure-Rust ZXing port) and [image](https://crates.io/crates/image), with optional [OpenCV wechat_qrcode](https://docs.opencv.org/4.x/d5/d04/classcv_1_1wechat__qrcode_1_1WeChatQRCode.html) as a second-pass backend
+- QR Code Scanning using [rxing](https://crates.io/crates/rxing) (pure-Rust ZXing port) and [image](https://crates.io/crates/image), with optional [OpenCV wechat_qrcode](https://docs.opencv.org/4.x/d5/d04/classcv_1_1wechat__qrcode_1_1WeChatQRCode.html) as a second-pass backend and optional [Dynamsoft Barcode Reader](https://www.dynamsoft.com/barcode-reader/overview/) REST API as a third-pass backend
 - EXIF Metadata Extraction using [kamadak-exif](https://crates.io/crates/kamadak-exif)
 - Structured Error Handling using [thiserror](https://crates.io/crates/thiserror) and [anyhow](https://crates.io/crates/anyhow)
 - Structured Diagnostic Logging using [tracing](https://crates.io/crates/tracing)
@@ -45,10 +48,10 @@ Key concepts and technologies used to develop **rustslinger** include:
 
 1. **Download** — paginates through all objects in the target S3 bucket and downloads them concurrently, throttled by a semaphore (`num_cpus × 10` permits) to avoid overwhelming the network or the AWS API.
 
-2. **Analyse** — as each download completes, the download permit is released and a CPU-bound analysis task is spawned on a blocking thread pool (throttled separately to `num_cpus` permits). Each image is analysed for:
+2. **Analyse** — as each download completes, the download permit is released and a CPU-bound analysis task is spawned on a blocking thread pool (throttled separately to `num_cpus` permits). Each image is analysed in this order:
    - **SHA-256 hash** of the raw bytes
-   - **QR codes** — via `rxing` (always), plus `wechat_qrcode` as a second pass when built with `--features wechat`; results are deduplicated by content across both backends
-   - **EXIF `UserComment`** field via `kamadak-exif` — extracted independently of QR results
+   - **EXIF `UserComment`** field via `kamadak-exif` — extracted first, independently of QR results
+   - **QR codes** — via `rxing` (always), plus `wechat_qrcode` as a second pass when built with `--features wechat`, and optionally Dynamsoft Barcode Reader REST API as a third pass when built with `--features dynamsoft`; all results are deduplicated by content across backends
 
 3. **Output** — results are streamed back to the main thread via an unbounded channel and printed as CSV-style rows:
 
@@ -56,7 +59,7 @@ Key concepts and technologies used to develop **rustslinger** include:
 index, key, hash, qr_code, qr_quality, qr_source
 ```
 
-Each image can produce multiple result rows — one per QR code found, plus one if an EXIF `UserComment` is present.
+Each image can produce multiple result rows — one per QR code found, plus one if an EXIF `UserComment` is present. The `qr_source` field identifies which backend found the code: `rxing`, `wechat_qrcode`, `dynamsoft`, or `EXIFUserComment`.
 
 ## QR Code Backends
 
@@ -91,6 +94,33 @@ rustslinger --bucket my-bucket --model-path /path/to/models
 ```
 
 Without `--model-path`, the wechat backend uses its built-in lightweight detector automatically.
+
+### Optional — Dynamsoft Barcode Reader (REST API, third-pass backend)
+
+When built with `--features dynamsoft`, **rustslinger** can call a Dynamsoft Barcode Reader service via its REST API. Dynamsoft is particularly effective on damaged, low-resolution, or unusual barcode formats. It runs as a third pass after rxing and wechat, contributing any codes not already found. All results are merged and deduplicated by content.
+
+Requires a running [Dynamsoft Barcode Reader](https://www.dynamsoft.com/barcode-reader/overview/) service instance and a valid license key.
+
+```bash
+cargo build --release --features dynamsoft
+```
+
+**Third-pass (after rxing + wechat):**
+
+```bash
+rustslinger --bucket my-bucket \
+  --dynamsoft-license YOUR_LICENSE \
+  --dynamsoft-endpoint http://localhost:18622/api/dbr/read
+```
+
+**Dynamsoft only (skip rxing and wechat):**
+
+```bash
+rustslinger --bucket my-bucket \
+  --dynamsoft-license YOUR_LICENSE \
+  --dynamsoft-endpoint http://localhost:18622/api/dbr/read \
+  --dynamsoft-only
+```
 
 ## Authentication
 

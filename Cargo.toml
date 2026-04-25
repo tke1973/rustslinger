@@ -14,6 +14,10 @@ license = "MIT OR Apache-2.0"
 # Build with: cargo build --features wechat
 wechat = ["dep:opencv"]
 
+# Enable Dynamsoft Barcode Reader via its REST API (requires a running DBR service + license).
+# Build with: cargo build --features dynamsoft
+dynamsoft = ["dep:reqwest", "dep:serde_json", "dep:base64"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.11"
@@ -35,6 +39,9 @@ hex = "0.4"
 tracing = "0.1"
 console-subscriber = "0.1.8"
 opencv = { version = "0.98", optional = true }
+reqwest = { version = "0.11", features = ["blocking", "json"], optional = true }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.21", optional = true }
 
 [dev-dependencies]
 qrcode = "0.13"
