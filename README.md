@@ -31,7 +31,7 @@ Key concepts and technologies used to develop **rustslinger** include:
 
 - Concurrency & Multithreading with async/await and threadpools using [futures](https://crates.io/crates/futures) and [tokio](https://crates.io/crates/tokio)
 - AWS Rust SDK using [aws-sdk-s3](https://crates.io/crates/aws-sdk-s3) and [aws-config](https://crates.io/crates/aws-config)
-- QR Code Scanning using [rqrr](https://crates.io/crates/rqrr) and [image](https://crates.io/crates/image), or optionally [OpenCV wechat_qrcode](https://docs.opencv.org/4.x/d5/d04/classcv_1_1wechat__qrcode_1_1WeChatQRCode.html)
+- QR Code Scanning using [rxing](https://crates.io/crates/rxing) (pure-Rust ZXing port) and [image](https://crates.io/crates/image), with optional [OpenCV wechat_qrcode](https://docs.opencv.org/4.x/d5/d04/classcv_1_1wechat__qrcode_1_1WeChatQRCode.html) as a second-pass backend
 - EXIF Metadata Extraction using [kamadak-exif](https://crates.io/crates/kamadak-exif)
 - Structured Error Handling using [thiserror](https://crates.io/crates/thiserror) and [anyhow](https://crates.io/crates/anyhow)
 - Structured Diagnostic Logging using [tracing](https://crates.io/crates/tracing)
@@ -47,7 +47,7 @@ Key concepts and technologies used to develop **rustslinger** include:
 
 2. **Analyse** — as each download completes, the download permit is released and a CPU-bound analysis task is spawned on a blocking thread pool (throttled separately to `num_cpus` permits). Each image is analysed for:
    - **SHA-256 hash** of the raw bytes
-   - **QR codes** — via `rqrr` by default, or `wechat_qrcode` when built with `--features wechat`
+   - **QR codes** — via `rxing` (always), plus `wechat_qrcode` as a second pass when built with `--features wechat`; results are deduplicated by content across both backends
    - **EXIF `UserComment`** field via `kamadak-exif` — extracted independently of QR results
 
 3. **Output** — results are streamed back to the main thread via an unbounded channel and printed as CSV-style rows:
@@ -60,15 +60,17 @@ Each image can produce multiple result rows — one per QR code found, plus one 
 
 ## QR Code Backends
 
-### Default — rqrr (pure Rust, no extra dependencies)
+### Default — rxing (pure Rust, no extra dependencies)
+
+`rxing` is a pure-Rust port of ZXing with native multi-code support. It runs on every build with `TryHarder` enabled to maximise detection coverage.
 
 ```bash
 cargo build --release
 ```
 
-### Optional — OpenCV wechat_qrcode (better detection on real-world images)
+### Optional — OpenCV wechat_qrcode (second-pass backend)
 
-The OpenCV backend handles rotated, blurry, low-contrast, and partially occluded QR codes that `rqrr` cannot decode. It requires OpenCV 4.x with contrib modules installed.
+When built with `--features wechat`, `wechat_qrcode` runs after `rxing` and contributes any QR codes not already found — particularly useful for rotated, blurry, low-contrast, or partially occluded codes. Results from both backends are merged and deduplicated by content. It requires OpenCV 4.x with contrib modules installed.
 
 **macOS:**
 ```bash
