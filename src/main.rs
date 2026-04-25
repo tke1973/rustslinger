@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use std::env;
+use std::path::PathBuf;
 
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
@@ -18,7 +19,7 @@ mod download;
 pub use crate::download::DownloadFile;
 
 mod analysis;
-pub use crate::analysis::{AnalyticsResult, AnalyticsResultSet};
+pub use crate::analysis::{AnalyticsConfig, AnalyticsResult, AnalyticsResultSet};
 
 /// rustslinger
 ///
@@ -42,6 +43,31 @@ struct Args {
     /// aws s3 bucket list
     #[arg(short = 'l', long, required = false)]
     bucketlist: bool,
+
+    /// Path to directory containing wechat_qrcode model files:
+    /// detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel.
+    /// Only used when built with --features wechat. Falls back to the
+    /// lightweight built-in detector if files are absent.
+    #[arg(short = 'm', long, required = false)]
+    model_path: Option<PathBuf>,
+
+    /// Dynamsoft Barcode Reader license key.
+    /// Only used when built with --features dynamsoft.
+    #[cfg(feature = "dynamsoft")]
+    #[arg(long, required = false)]
+    dynamsoft_license: Option<String>,
+
+    /// Dynamsoft REST API endpoint URL (e.g. http://localhost:18622/api/dbr/read).
+    /// Only used when built with --features dynamsoft.
+    #[cfg(feature = "dynamsoft")]
+    #[arg(long, required = false)]
+    dynamsoft_endpoint: Option<String>,
+
+    /// Skip rxing and wechat — use Dynamsoft as the only QR/barcode backend.
+    /// Only used when built with --features dynamsoft.
+    #[cfg(feature = "dynamsoft")]
+    #[arg(long, required = false)]
+    dynamsoft_only: bool,
 }
 
 async fn list_s3buckets(client: &Client) -> Result<(), RustslingerError> {
@@ -104,7 +130,16 @@ async fn main() -> Result<()> {
     let handle_data = crate::download::download_files_tasker(client.clone(), &args.bucket).await;
 
     println!("Analyzing files.");
-    let mut analysis_results = AnalyticsResult::new(handle_data).await;
+    let config = AnalyticsConfig {
+        model_path: args.model_path,
+        #[cfg(feature = "dynamsoft")]
+        dynamsoft_license: args.dynamsoft_license,
+        #[cfg(feature = "dynamsoft")]
+        dynamsoft_endpoint: args.dynamsoft_endpoint,
+        #[cfg(feature = "dynamsoft")]
+        dynamsoft_only: args.dynamsoft_only,
+    };
+    let mut analysis_results = AnalyticsResult::new(handle_data, config).await;
 
     println!("Waiting for results.");
     let mut rc: u128 = 0;
