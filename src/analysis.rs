@@ -5,8 +5,7 @@
 
 use sha2::{Digest, Sha256};
 
-#[cfg(not(feature = "wechat"))]
-use image::io::Reader as ImageReader;
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +36,83 @@ pub struct AnalyticsResult {
 }
 
 // ---------------------------------------------------------------------------
-// wechat_qrcode path (compiled in only with --features wechat)
+// Image preparation — proportional downscale only, Lanczos3
+// ---------------------------------------------------------------------------
+
+fn prepare_luma(image: &image::DynamicImage) -> image::GrayImage {
+    let luma = image.to_luma8();
+    let (w, h) = (luma.width(), luma.height());
+    const MAX_DIM: u32 = 4000;
+    if w > MAX_DIM || h > MAX_DIM {
+        let scale = MAX_DIM as f32 / w.max(h) as f32;
+        image::imageops::resize(
+            &luma,
+            (w as f32 * scale) as u32,
+            (h as f32 * scale) as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        luma
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rxing backend — pure Rust, always active
+// ---------------------------------------------------------------------------
+
+fn scan_qr_rxing(
+    image_bytes: &bytes::Bytes,
+    key: &str,
+    hash_string: &str,
+    tx: &UnboundedSender<AnalyticsResultSet>,
+    emitted: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let image = image::load_from_memory(image_bytes)
+        .map_err(|e| anyhow::anyhow!("image decode: {}", e))?;
+
+    let luma = prepare_luma(&image);
+    let (width, height) = (luma.width(), luma.height());
+
+    let mut hints = rxing::DecodeHints::default();
+    hints.TryHarder = Some(true);
+
+    let results = match rxing::helpers::detect_multiple_in_luma_with_hints(
+        luma.into_raw(),
+        width,
+        height,
+        &mut hints,
+    ) {
+        Ok(r) => r,
+        // NotFoundException means no barcodes found — not an error condition.
+        Err(rxing::Exceptions::NotFoundException(_)) => return Ok(()),
+        Err(e) => return Err(anyhow::anyhow!("rxing: {}", e)),
+    };
+
+    for result in results {
+        let text = result.getText().to_string();
+        if emitted.insert(text.clone()) {
+            if tx
+                .send(AnalyticsResultSet {
+                    key: key.to_string(),
+                    hash: hash_string.to_string(),
+                    qr_code: text,
+                    qr_quality: "OK".to_string(),
+                    qr_source: "rxing".to_string(),
+                })
+                .is_err()
+            {
+                error!(key, "result channel closed");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// wechat_qrcode backend — OpenCV, compiled in with --features wechat
+// Runs after rxing; only emits codes not already found by rxing.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "wechat")]
@@ -63,7 +138,6 @@ fn build_wechat_detector(
         warn!(path = ?p, "model files incomplete, falling back to lightweight detector");
     }
 
-    // Empty strings = built-in lightweight detector (no CNN, similar quality to rqrr)
     Ok(WeChatQRCode::new("", "", "", "")?)
 }
 
@@ -74,10 +148,10 @@ fn scan_qr_wechat(
     hash_string: &str,
     model_path: &Option<PathBuf>,
     tx: &UnboundedSender<AnalyticsResultSet>,
+    emitted: &mut HashSet<String>,
 ) -> anyhow::Result<()> {
     use opencv::prelude::*;
 
-    // Decode image bytes directly with OpenCV — outputs BGR automatically.
     let buf = opencv::core::Vector::<u8>::from_iter(image_bytes.iter().copied());
     let mat = opencv::imgcodecs::imdecode(&buf, opencv::imgcodecs::IMREAD_COLOR)?;
 
@@ -90,18 +164,21 @@ fn scan_qr_wechat(
     let results = detector.detect_and_decode(&mat, &mut points)?;
 
     for qr_code in results {
-        if tx
-            .send(AnalyticsResultSet {
-                key: key.to_string(),
-                hash: hash_string.to_string(),
-                qr_code,
-                qr_quality: "OK".to_string(),
-                qr_source: "wechat_qrcode".to_string(),
-            })
-            .is_err()
-        {
-            error!(key, "result channel closed");
-            break;
+        // Only emit codes not already found by rxing.
+        if emitted.insert(qr_code.clone()) {
+            if tx
+                .send(AnalyticsResultSet {
+                    key: key.to_string(),
+                    hash: hash_string.to_string(),
+                    qr_code,
+                    qr_quality: "OK".to_string(),
+                    qr_source: "wechat_qrcode".to_string(),
+                })
+                .is_err()
+            {
+                error!(key, "result channel closed");
+                break;
+            }
         }
     }
 
@@ -109,55 +186,7 @@ fn scan_qr_wechat(
 }
 
 // ---------------------------------------------------------------------------
-// rqrr path (default, no extra dependencies)
-// ---------------------------------------------------------------------------
-
-#[cfg(not(feature = "wechat"))]
-fn scan_qr_rqrr(
-    image_bytes: &bytes::Bytes,
-    key: &str,
-    hash_string: &str,
-    tx: &UnboundedSender<AnalyticsResultSet>,
-) -> anyhow::Result<()> {
-    let image = ImageReader::new(Cursor::new(image_bytes))
-        .with_guessed_format()?
-        .decode()?;
-
-    let luma = image::imageops::resize(
-        &image.to_luma8(),
-        800,
-        600,
-        image::imageops::FilterType::Nearest,
-    );
-
-    for g in rqrr::PreparedImage::prepare(luma).detect_grids() {
-        let message = match g.decode() {
-            Ok((_, qrcode)) => AnalyticsResultSet {
-                key: key.to_string(),
-                hash: hash_string.to_string(),
-                qr_code: qrcode,
-                qr_quality: "OK".to_string(),
-                qr_source: "rqrr".to_string(),
-            },
-            Err(e) => AnalyticsResultSet {
-                key: key.to_string(),
-                hash: hash_string.to_string(),
-                qr_code: "DECODER_ERROR".to_string(),
-                qr_quality: e.to_string(),
-                qr_source: "rqrr".to_string(),
-            },
-        };
-        if tx.send(message).is_err() {
-            error!(key, "result channel closed");
-            return Ok(());
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Core analytics — dispatches to the active QR backend
+// Core analytics — runs rxing then (optionally) wechat, union with dedup
 // ---------------------------------------------------------------------------
 
 impl AnalyticsResult {
@@ -170,14 +199,19 @@ impl AnalyticsResult {
     ) {
         let hash_string = hex::encode(Sha256::digest(&image_bytes));
 
-        #[cfg(feature = "wechat")]
-        if let Err(e) = scan_qr_wechat(&image_bytes, &key, &hash_string, &_model_path, &tx) {
-            warn!(key = key, error = %e, "skipping QR scan: wechat_qrcode failed");
+        // Tracks all QR codes emitted for this image — shared across backends
+        // so each unique code is sent exactly once.
+        let mut emitted: HashSet<String> = HashSet::new();
+
+        if let Err(e) = scan_qr_rxing(&image_bytes, &key, &hash_string, &tx, &mut emitted) {
+            warn!(key = key, error = %e, "rxing scan failed");
         }
 
-        #[cfg(not(feature = "wechat"))]
-        if let Err(e) = scan_qr_rqrr(&image_bytes, &key, &hash_string, &tx) {
-            warn!(key = key, error = %e, "skipping QR scan: image decode failed");
+        #[cfg(feature = "wechat")]
+        if let Err(e) =
+            scan_qr_wechat(&image_bytes, &key, &hash_string, &_model_path, &tx, &mut emitted)
+        {
+            warn!(key = key, error = %e, "wechat_qrcode scan failed");
         }
 
         // EXIF is independent — absence is normal, not an error.
@@ -268,6 +302,16 @@ mod tests {
         buf.into_inner()
     }
 
+    fn qr_png(content: &str) -> Vec<u8> {
+        use qrcode::QrCode;
+        let code = QrCode::new(content.as_bytes()).unwrap();
+        let img = code.render::<image::Luma<u8>>().build();
+        let dynamic = image::DynamicImage::ImageLuma8(img);
+        let mut buf = Cursor::new(Vec::new());
+        dynamic.write_to(&mut buf, image::ImageOutputFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
     async fn drain(result: &mut AnalyticsResult) -> Vec<AnalyticsResultSet> {
         let mut out = Vec::new();
         while let Some(r) = result.get_next().await {
@@ -302,11 +346,11 @@ mod tests {
             drain(&mut result),
         )
         .await
-        .expect("timed out waiting for empty joinset to close channel");
+        .expect("timed out");
         assert!(out.is_empty());
     }
 
-    // --- pipeline: download error is skipped gracefully ---
+    // --- pipeline: error handling ---
 
     #[tokio::test]
     async fn download_error_produces_no_results() {
@@ -327,8 +371,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // --- pipeline: invalid bytes are skipped gracefully ---
-
     #[tokio::test]
     async fn invalid_image_bytes_produce_no_results() {
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
@@ -343,7 +385,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // --- pipeline: valid image with no QR and no EXIF ---
+    // --- pipeline: valid image, no QR ---
 
     #[tokio::test]
     async fn valid_image_no_qr_no_exif_produces_no_results() {
@@ -359,49 +401,10 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // --- pipeline: result fields are populated correctly ---
+    // --- rxing: detects a single QR code ---
 
     #[tokio::test]
-    async fn result_key_and_hash_are_correct() {
-        let data = solid_png();
-        let expected_hash = hex::encode(Sha256::digest(&data));
-
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tx.send(AnalyticsResultSet {
-            key: "test/photo.jpg".to_string(),
-            hash: expected_hash.clone(),
-            qr_code: "https://example.com".to_string(),
-            qr_quality: "OK".to_string(),
-            qr_source: "rqrr".to_string(),
-        })
-        .unwrap();
-        drop(tx);
-
-        let mut mock_result = AnalyticsResult { rx };
-        let out = drain(&mut mock_result).await;
-
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].key, "test/photo.jpg");
-        assert_eq!(out[0].hash, expected_hash);
-        assert_eq!(out[0].qr_source, "rqrr");
-    }
-
-    // --- wechat_qrcode path (only compiled with --features wechat) ---
-
-    #[cfg(feature = "wechat")]
-    fn qr_png(content: &str) -> Vec<u8> {
-        use qrcode::QrCode;
-        let code = QrCode::new(content.as_bytes()).unwrap();
-        let img = code.render::<image::Luma<u8>>().build();
-        let dynamic = image::DynamicImage::ImageLuma8(img);
-        let mut buf = Cursor::new(Vec::new());
-        dynamic.write_to(&mut buf, image::ImageOutputFormat::Png).unwrap();
-        buf.into_inner()
-    }
-
-    #[cfg(feature = "wechat")]
-    #[tokio::test]
-    async fn wechat_detects_qr_code() {
+    async fn rxing_detects_single_qr_code() {
         let content = "https://github.com/tke1973/rustslinger";
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
         joinset.spawn(async move { Ok(make_file("qr.png", qr_png(content))) });
@@ -414,25 +417,93 @@ mod tests {
         .await
         .expect("timed out");
 
-        assert!(!out.is_empty(), "wechat_qrcode should have detected the QR code");
+        assert_eq!(out.len(), 1);
         assert_eq!(out[0].qr_code, content);
-        assert_eq!(out[0].qr_source, "wechat_qrcode");
+        assert_eq!(out[0].qr_source, "rxing");
     }
 
-    #[cfg(feature = "wechat")]
+    // --- rxing: each unique QR code emitted exactly once ---
+
     #[tokio::test]
-    async fn wechat_handles_invalid_image_gracefully() {
+    async fn rxing_each_qr_code_emitted_once() {
+        // Feed the same image twice — two files, same QR content.
+        // Each file is independent so each should emit one result.
+        let content = "dedup-test";
+        let data = qr_png(content);
         let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
-        joinset.spawn(async { Ok(make_file("corrupt.jpg", vec![0u8; 256])) });
+        let d1 = data.clone();
+        let d2 = data.clone();
+        joinset.spawn(async move { Ok(make_file("a.png", d1)) });
+        joinset.spawn(async move { Ok(make_file("b.png", d2)) });
 
         let mut result = AnalyticsResult::new(joinset, None).await;
         let out = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(15),
             drain(&mut result),
         )
         .await
         .expect("timed out");
-        assert!(out.is_empty());
+
+        // Two files → two results (dedup is per-image, not global)
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.qr_code == content));
+    }
+
+    // --- result fields ---
+
+    #[tokio::test]
+    async fn result_key_and_hash_are_correct() {
+        let data = solid_png();
+        let expected_hash = hex::encode(Sha256::digest(&data));
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(AnalyticsResultSet {
+            key: "test/photo.jpg".to_string(),
+            hash: expected_hash.clone(),
+            qr_code: "https://example.com".to_string(),
+            qr_quality: "OK".to_string(),
+            qr_source: "rxing".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut mock_result = AnalyticsResult { rx };
+        let out = drain(&mut mock_result).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].key, "test/photo.jpg");
+        assert_eq!(out[0].hash, expected_hash);
+        assert_eq!(out[0].qr_source, "rxing");
+    }
+
+    // --- wechat feature: dual-backend union ---
+
+    #[cfg(feature = "wechat")]
+    #[tokio::test]
+    async fn dual_backend_detects_qr_code() {
+        // Both rxing and wechat run. The QR code should appear exactly once
+        // regardless of which backend finds it first.
+        let content = "https://github.com/tke1973/rustslinger";
+        let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
+        joinset.spawn(async move { Ok(make_file("qr.png", qr_png(content))) });
+
+        let mut result = AnalyticsResult::new(joinset, None).await;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            drain(&mut result),
+        )
+        .await
+        .expect("timed out");
+
+        // Exactly one result — dedup prevents double-emission.
+        assert_eq!(out.len(), 1, "same QR code must not be emitted twice");
+        assert_eq!(out[0].qr_code, content);
+        // Source is whichever backend found it first (rxing runs first).
+        assert!(
+            out[0].qr_source == "rxing" || out[0].qr_source == "wechat_qrcode",
+            "unexpected source: {}",
+            out[0].qr_source
+        );
     }
 
     #[cfg(feature = "wechat")]
@@ -444,6 +515,22 @@ mod tests {
         let mut result = AnalyticsResult::new(joinset, None).await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(10),
+            drain(&mut result),
+        )
+        .await
+        .expect("timed out");
+        assert!(out.is_empty());
+    }
+
+    #[cfg(feature = "wechat")]
+    #[tokio::test]
+    async fn wechat_handles_invalid_image_gracefully() {
+        let mut joinset: JoinSet<Result<DownloadFile, RustslingerError>> = JoinSet::new();
+        joinset.spawn(async { Ok(make_file("corrupt.jpg", vec![0u8; 256])) });
+
+        let mut result = AnalyticsResult::new(joinset, None).await;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
             drain(&mut result),
         )
         .await
