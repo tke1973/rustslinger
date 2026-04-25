@@ -7,24 +7,36 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RustslingerError {
-    #[error("Error: could not list buckets")]
-    AWSListBucketsOutputError,
+    #[error("could not list S3 buckets")]
+    ListBuckets,
 
-    #[error("Error: could not list s3 buckets")]
-    AWSListS3BucketsError,
+    #[error("download failed for '{key}': {reason}")]
+    Download { key: String, reason: String },
 
-    #[error("Error: could not list s3 objects")]
-    AWSListS3ObjectsError,
+    #[error("semaphore closed unexpectedly")]
+    SemaphoreClosed,
+}
 
-    #[error("Error: could not list s3 objects contents")]
-    AWSListS3ObjectsContentsError,
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    #[error("Error: could not aquire semaphore permit")]
-    SemaphorePermitError,
+    #[test]
+    fn list_buckets_message() {
+        assert_eq!(RustslingerError::ListBuckets.to_string(), "could not list S3 buckets");
+    }
 
-    #[error("Error: could not create thread pool")]
-    ThreadPoolCreationError,
+    #[test]
+    fn download_message_includes_key_and_reason() {
+        let e = RustslingerError::Download {
+            key: "images/test.jpg".to_string(),
+            reason: "timeout".to_string(),
+        };
+        assert_eq!(e.to_string(), "download failed for 'images/test.jpg': timeout");
+    }
 
-    #[error("Error: unknown error - impelment me!")]
-    Unknown,
+    #[test]
+    fn semaphore_closed_message() {
+        assert_eq!(RustslingerError::SemaphoreClosed.to_string(), "semaphore closed unexpectedly");
+    }
 }
