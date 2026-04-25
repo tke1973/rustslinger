@@ -14,12 +14,13 @@ rustslinger is a tool for scanning and analysing large image data sets stored in
 Usage: rustslinger [OPTIONS] --bucket <BUCKET>
 
 Options:
-  -b, --bucket <BUCKET>    aws s3 bucket
-  -p, --prefix <PREFIX>    aws s3 prefix
-  -f, --profile <PROFILE>  aws s3 profile
-  -l, --bucketlist         aws s3 bucket list
-  -h, --help               Print help information
-  -V, --version            Print version information
+  -b, --bucket <BUCKET>        aws s3 bucket
+  -p, --prefix <PREFIX>        aws s3 prefix
+  -f, --profile <PROFILE>      aws s3 profile
+  -l, --bucketlist             aws s3 bucket list
+  -m, --model-path <PATH>      path to wechat_qrcode model files directory
+  -h, --help                   Print help information
+  -V, --version                Print version information
 ```
 
 ## Why?
@@ -30,7 +31,7 @@ Key concepts and technologies used to develop **rustslinger** include:
 
 - Concurrency & Multithreading with async/await and threadpools using [futures](https://crates.io/crates/futures) and [tokio](https://crates.io/crates/tokio)
 - AWS Rust SDK using [aws-sdk-s3](https://crates.io/crates/aws-sdk-s3) and [aws-config](https://crates.io/crates/aws-config)
-- QR Code Scanning using [rqrr](https://crates.io/crates/rqrr) and [image](https://crates.io/crates/image)
+- QR Code Scanning using [rqrr](https://crates.io/crates/rqrr) and [image](https://crates.io/crates/image), or optionally [OpenCV wechat_qrcode](https://docs.opencv.org/4.x/d5/d04/classcv_1_1wechat__qrcode_1_1WeChatQRCode.html)
 - EXIF Metadata Extraction using [kamadak-exif](https://crates.io/crates/kamadak-exif)
 - Structured Error Handling using [thiserror](https://crates.io/crates/thiserror) and [anyhow](https://crates.io/crates/anyhow)
 - Structured Diagnostic Logging using [tracing](https://crates.io/crates/tracing)
@@ -46,7 +47,7 @@ Key concepts and technologies used to develop **rustslinger** include:
 
 2. **Analyse** — as each download completes, the download permit is released and a CPU-bound analysis task is spawned on a blocking thread pool (throttled separately to `num_cpus` permits). Each image is analysed for:
    - **SHA-256 hash** of the raw bytes
-   - **QR codes** via `rqrr` — the image is decoded, resized to 800×600, and scanned for QR grids
+   - **QR codes** — via `rqrr` by default, or `wechat_qrcode` when built with `--features wechat`
    - **EXIF `UserComment`** field via `kamadak-exif` — extracted independently of QR results
 
 3. **Output** — results are streamed back to the main thread via an unbounded channel and printed as CSV-style rows:
@@ -56,6 +57,38 @@ index, key, hash, qr_code, qr_quality, qr_source
 ```
 
 Each image can produce multiple result rows — one per QR code found, plus one if an EXIF `UserComment` is present.
+
+## QR Code Backends
+
+### Default — rqrr (pure Rust, no extra dependencies)
+
+```bash
+cargo build --release
+```
+
+### Optional — OpenCV wechat_qrcode (better detection on real-world images)
+
+The OpenCV backend handles rotated, blurry, low-contrast, and partially occluded QR codes that `rqrr` cannot decode. It requires OpenCV 4.x with contrib modules installed.
+
+**macOS:**
+```bash
+brew install opencv
+cargo build --release --features wechat
+```
+
+**With CNN model files (best quality):**
+
+Download the four model files from the [OpenCV contrib test data repository](https://github.com/opencv/opencv_contrib/tree/master/modules/wechat_qrcode/src/zxing/qrcode):
+- `detect.prototxt` + `detect.caffemodel`
+- `sr.prototxt` + `sr.caffemodel`
+
+Then pass the directory at runtime:
+
+```bash
+rustslinger --bucket my-bucket --model-path /path/to/models
+```
+
+Without `--model-path`, the wechat backend uses its built-in lightweight detector automatically.
 
 ## Authentication
 

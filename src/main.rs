@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use std::env;
+use std::path::PathBuf;
 
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::credentials::ProfileFileCredentialsProvider;
@@ -42,6 +43,13 @@ struct Args {
     /// aws s3 bucket list
     #[arg(short = 'l', long, required = false)]
     bucketlist: bool,
+
+    /// Path to directory containing wechat_qrcode model files:
+    /// detect.prototxt, detect.caffemodel, sr.prototxt, sr.caffemodel.
+    /// Only used when built with --features wechat. Falls back to the
+    /// lightweight built-in detector if files are absent.
+    #[arg(short = 'm', long, required = false)]
+    model_path: Option<PathBuf>,
 }
 
 async fn list_s3buckets(client: &Client) -> Result<(), RustslingerError> {
@@ -104,7 +112,7 @@ async fn main() -> Result<()> {
     let handle_data = crate::download::download_files_tasker(client.clone(), &args.bucket).await;
 
     println!("Analyzing files.");
-    let mut analysis_results = AnalyticsResult::new(handle_data).await;
+    let mut analysis_results = AnalyticsResult::new(handle_data, args.model_path).await;
 
     println!("Waiting for results.");
     let mut rc: u128 = 0;
