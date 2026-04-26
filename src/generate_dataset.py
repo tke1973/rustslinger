@@ -160,7 +160,6 @@ def vision_to_coco(
 
 
 def vision_point_to_coco(px: float, py: float, img_w: int, img_h: int) -> tuple[float, float]:
-    """Convert a single Vision normalised point → COCO absolute pixels."""
     return round(px * img_w, 2), round((1.0 - py) * img_h, 2)
 
 

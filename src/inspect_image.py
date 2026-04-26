@@ -29,9 +29,9 @@ def dimensions(cg) -> tuple[int, int]:
     return Quartz.CGImageGetWidth(cg), Quartz.CGImageGetHeight(cg)
 
 
-def flip_y(px: float, py: float, img_h: int) -> tuple[float, float]:
-    """CoreGraphics Y=0 bottom → COCO Y=0 top."""
-    return round(px, 2), round((1.0 - py) * img_h, 2)
+def to_coco_point(px: float, py: float, img_w: int, img_h: int) -> tuple[float, float]:
+    """Normalised Vision point → absolute COCO pixels (Y-axis flip included)."""
+    return round(px * img_w, 2), round((1.0 - py) * img_h, 2)
 
 
 def detect(data: bytes) -> dict:
@@ -64,7 +64,7 @@ def detect(data: bytes) -> dict:
 
         # keypoints: 4 corners [x, y, visibility=2] in TL→TR→BR→BL order
         pts     = [obs.topLeft(), obs.topRight(), obs.bottomRight(), obs.bottomLeft()]
-        kp_flat = [c for p in pts for c in (*flip_y(p.x, p.y, h), 2)]
+        kp_flat = [c for p in pts for c in (*to_coco_point(p.x, p.y, w, h), 2)]
 
         annotations.append({
             "bbox":           bbox,
