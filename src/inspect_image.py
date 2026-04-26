@@ -67,6 +67,7 @@ def detect(data: bytes) -> dict:
         kp_flat = [c for p in pts for c in (*to_coco_point(p.x, p.y, w, h), 2)]
 
         annotations.append({
+            "qr_content":     obs.payloadStringValue(),
             "bbox":           bbox,
             "area":           round(bbox[2] * bbox[3], 2),
             "keypoints":      kp_flat,
